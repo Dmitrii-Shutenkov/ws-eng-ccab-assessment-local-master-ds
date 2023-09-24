@@ -4,6 +4,11 @@ import { json } from "body-parser";
 
 const DEFAULT_BALANCE = 100;
 
+interface ScriptResult {
+    '0': string
+    '1': number
+}
+
 interface ChargeResult {
     isAuthorized: boolean;
     remainingBalance: number;
@@ -30,14 +35,25 @@ async function reset(account: string): Promise<void> {
 async function charge(account: string, charges: number): Promise<ChargeResult> {
     const client = await connect();
     try {
-        const balance = parseInt((await client.get(`${account}/balance`)) ?? "");
-        if (balance >= charges) {
-            await client.set(`${account}/balance`, balance - charges);
-            const remainingBalance = parseInt((await client.get(`${account}/balance`)) ?? "");
-            return { isAuthorized: true, remainingBalance, charges };
-        } else {
-            return { isAuthorized: false, remainingBalance: balance, charges: 0 };
-        }
+        const luaScript = `local currentValue = tonumber(redis.call('GET', KEYS[1]))
+        local charges = tonumber(KEYS[2])
+        local results = {}
+        if currentValue and currentValue >= charges then
+            redis.call('DECRBY', KEYS[1], charges)
+            results[#results+1] = 'true'
+            results[#results+1] = redis.call('GET', KEYS[1])
+            return results
+        else
+            results[#results+1] = 'false'
+            results[#results+1] = currentValue
+            return results
+        end`
+        const evalOptions = {
+            keys: [`account/balance`, `${charges}`]
+          };
+
+        const result = <ScriptResult> <unknown> await client.eval(luaScript, evalOptions)
+        return { isAuthorized: result['0'] === "true" ? true : false, remainingBalance: result['1'], charges: result['0'] === "true" ? charges : 0}
     } finally {
         await client.disconnect();
     }
